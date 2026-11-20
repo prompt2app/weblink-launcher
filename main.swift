@@ -14,7 +14,9 @@ struct WebLink: Codable, Identifiable, Hashable {
 
 enum Paths {
     static let fm = FileManager.default
-    static let home = fm.homeDirectoryForCurrentUser
+    // 设置环境变量 WEBLINK_HOME 可把数据和入口放到别的根目录（用于测试/演示，不影响正式数据）
+    static let home = ProcessInfo.processInfo.environment["WEBLINK_HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+        ?? fm.homeDirectoryForCurrentUser
     static let appsDir = home.appendingPathComponent("Applications/网页快开", isDirectory: true)
     static let supportDir = home.appendingPathComponent("Library/Application Support/网页快开", isDirectory: true)
     static let iconsDir = supportDir.appendingPathComponent("icons", isDirectory: true)
