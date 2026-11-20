@@ -15,7 +15,7 @@
 
 ### 方式一：下载 Release（推荐）
 
-1. 到 [Releases](../../releases) 下载 `网页快开管理-x.y.z.zip`，解压
+1. 到 [Releases](../../releases) 下载 `weblink-launcher-x.y.z-arm64.zip`，解压
 2. 把 `网页快开管理.app` 放到 `~/Applications/网页快开/`。放到其他位置也能用，但放在这里方便统一管理
 3. 首次打开：应用没有 Apple 开发者签名，用的是 ad-hoc 签名，系统会拦截。解决办法任选一种：
    - 在 Finder 里右键点应用，选「打开」，再点「打开」
