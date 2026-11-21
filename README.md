@@ -6,6 +6,7 @@
 
 - 按 `⌘ 空格` 输入名称回车，就能打开对应网址，用的是系统自带的 Spotlight，不用额外装启动器
 - 每个网址都有自己的图标，在 Spotlight 里一眼就能认出来
+- 支持关键词：中文名称自动支持拼音首字母和全拼（腾讯云 → `txy`、`tengxunyun`），也可以自己加关键词
 - 有图形化管理器，可以添加、编辑、删除、排序网址
 - 自动抓取网站图标；网站图标太小时，用网站主色生成文字图标
 - 提供命令行，方便批量导入，比如从 uTools「网页快开」迁移过来
@@ -62,7 +63,7 @@ cd weblink-launcher
 
 1. 打开「网页快开管理」，点「添加」，填写名称和网址后保存。图标会自动获取
 2. 按 `⌘ 空格`，输入名称（或者开头几个字），回车，浏览器就会打开这个网址
-3. 想用缩写打开，比如输入 `txy` 打开腾讯云：把名称改成 `txy 腾讯云` 这种形式
+3. 想用缩写打开：中文名称会自动支持拼音首字母和全拼，比如输入 `txy` 或 `tengxun` 就能打开「腾讯云」。还想用别的词，在编辑窗口的「关键词」里填，多个用空格或逗号分隔，比如 `tx 腾讯`
 
 ## 卸载
 
@@ -83,6 +84,7 @@ build.sh     编译、生成应用图标、签名，安装到 ~/Applications/网
 
 - 每个入口用 `osacompile` 编译，内容只有一句 `open location "<网址>"`，以后台方式运行（`LSUIElement`），不会在 Dock 里闪一下。
 - 图标会自动抓取：先找网站的 `apple-touch-icon` 和 `<link rel=icon>`，找不到再用 `/favicon.ico`，选像素最大的一张，放进 macOS 风格的白色圆角方块里。网站图标太小（小于 64px）时，改用「网站主色 + 名称首字」生成文字图标。
+- 关键词（含自动拼音）写在入口 `Info.plist` 的 `CFBundleAlternateNames` 里，Spotlight 会把它收进 `kMDItemAlternateNames`，和应用名一样按前缀匹配。系统自带应用也是这么做的，比如搜 `iCal` 能找到「日历」。入口名称不用改。
 - 生成入口时会去掉 `CFBundleIconName`。这一步不能省：留着它，系统会去找 `Assets.car` 里的默认图标，自定义图标就显示不出来。
 
 ## 管理器
@@ -122,9 +124,19 @@ M=~/Applications/网页快开/网页快开管理.app/Contents/MacOS/WebLinkManag
 
 # 提供一张备选原图，和网站图标比较后取更清晰的那张
 "$M" --import "Jenkins" "http://jenkins.example.com" src:/path/to/logo.png
+
+# 添加时指定关键词（-k，多个用空格或逗号分隔）
+"$M" --import "腾讯云" "https://console.cloud.tencent.com/" -k "tx 腾讯"
+
+# 只修改已有网址的关键词，不重新生成入口；传空字符串表示清空
+"$M" --keywords "腾讯云" "tx 腾讯"
+
+# 给所有已有入口补写拼音和关键词（从旧版本升级后执行一次）
+"$M" --sync-keywords
 ```
 
 ## 常见问题
 
 - **Spotlight 第一项不是入口**：多半是剪贴板记录或同名文件排在了前面。用 `↓` 选中入口回车，用过几次后 Spotlight 就会把它排到第一。
+- **关键词搜不到**：Spotlight 重新索引需要几秒钟。也可以执行 `mdimport ~/Applications/网页快开/*.app` 手动刷新。
 - **图标没有更新**：这是系统图标缓存，稍等一会儿，或者执行 `killall Dock`。

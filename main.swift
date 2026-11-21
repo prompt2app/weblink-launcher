@@ -10,6 +10,68 @@ struct WebLink: Codable, Identifiable, Hashable {
     var name: String
     var url: String
     var appName: String?
+    var keywords: [String]?   // 额外的搜索关键词，如「腾讯云」配 txy
+}
+
+// MARK: - 搜索关键词
+
+/// 把用户输入的「txy, tx 腾讯」拆成去重后的关键词列表
+func parseKeywords(_ text: String) -> [String] {
+    var seen = Set<String>()
+    return text.components(separatedBy: CharacterSet(charactersIn: ",，;；、 \t\n"))
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+}
+
+/// 名称含中文时，自动生成拼音首字母和全拼，如 腾讯云 → txy、tengxunyun
+func pinyinKeywords(_ name: String) -> [String] {
+    var initials = "", full = "", hasCJK = false
+    for ch in name {
+        if ch.isASCII {
+            if ch.isLetter || ch.isNumber { initials.append(ch); full.append(ch) }
+            continue
+        }
+        let s = NSMutableString(string: String(ch))
+        CFStringTransform(s, nil, kCFStringTransformToLatin, false)
+        CFStringTransform(s, nil, kCFStringTransformStripDiacritics, false)
+        let py = (s as String).filter { $0.isASCII && $0.isLetter }
+        guard !py.isEmpty, py != String(ch) else { continue }
+        hasCJK = true
+        initials.append(py.first!)
+        full += py
+    }
+    guard hasCJK else { return [] }
+    return Array(Set([initials.lowercased(), full.lowercased()])).sorted { $0.count < $1.count }
+}
+
+/// 入口最终写进 Spotlight 的全部关键词：手动关键词 + 自动拼音
+func searchKeywords(_ link: WebLink) -> [String] {
+    var seen = Set<String>()
+    return ((link.keywords ?? []) + pinyinKeywords(link.name)).filter { seen.insert($0.lowercased()).inserted }
+}
+
+/// Spotlight 的「应用程序」结果只按名称和 kMDItemAlternateNames 匹配；
+/// 后者来自 Info.plist 的 CFBundleAlternateNames（系统应用就靠它让 iCal 搜到「日历」）
+let altNamesKey = "CFBundleAlternateNames"
+
+/// 把关键词写进已有入口的 CFBundleAlternateNames，重新签名并让 Spotlight 重新索引；有变化返回 true
+@discardableResult
+func applyKeywords(_ keywords: [String], to app: URL) -> Bool {
+    let plistURL = app.appendingPathComponent("Contents/Info.plist")
+    guard let pd = try? Data(contentsOf: plistURL),
+          var plist = (try? PropertyListSerialization.propertyList(from: pd, format: nil)) as? [String: Any]
+    else { return false }
+    // 清掉早期版本写的 kMDItemKeywords 扩展属性（Spotlight 应用结果不认它）
+    removexattr(app.path, "com.apple.metadata:kMDItemKeywords", 0)
+    guard (plist[altNamesKey] as? [String] ?? []) != keywords else { return false }
+    if keywords.isEmpty { plist.removeValue(forKey: altNamesKey) } else { plist[altNamesKey] = keywords }
+    guard let out = try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0),
+          (try? out.write(to: plistURL)) != nil else { return false }
+    run("/usr/bin/codesign", ["--force", "--deep", "-s", "-", app.path])
+    run("/usr/bin/touch", [app.path])
+    run(lsregister, ["-f", app.path])
+    run("/usr/bin/mdimport", [app.path])
+    return true
 }
 
 enum Paths {
@@ -318,6 +380,8 @@ func installLink(_ link: WebLink, icon: NSImage) throws -> WebLink {
     plist["CFBundleIdentifier"] = "local.weblink." + link.id
     plist["CFBundleName"] = link.name
     plist["CFBundleDisplayName"] = link.name
+    let kw = searchKeywords(link)
+    if !kw.isEmpty { plist[altNamesKey] = kw }
     try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: plistURL)
     try? Paths.fm.removeItem(at: app.appendingPathComponent("Contents/Resources/Assets.car"))
 
@@ -349,6 +413,16 @@ func installLink(_ link: WebLink, icon: NSImage) throws -> WebLink {
     return updated
 }
 
+/// 给已有入口补写/更新关键词（没变化的跳过）
+func syncAllKeywords(_ links: [WebLink]) {
+    for l in links {
+        guard let n = l.appName else { continue }
+        let p = Paths.appsDir.appendingPathComponent(n)
+        guard Paths.fm.fileExists(atPath: p.path) else { continue }
+        applyKeywords(searchKeywords(l), to: p)
+    }
+}
+
 // MARK: - 状态
 
 @MainActor
@@ -364,6 +438,9 @@ final class Store: ObservableObject {
     init() {
         Paths.ensure()
         links = loadLinks()
+        // 老版本生成的入口还没有关键词：补写一次（没变化就跳过，不会重复索引）
+        let snapshot = links
+        Task.detached { syncAllKeywords(snapshot) }
     }
 
     func icon(for l: WebLink) -> NSImage {
@@ -377,10 +454,11 @@ final class Store: ObservableObject {
         links.contains { $0.id != id && safeAppName($0.name) == safeAppName(name) }
     }
 
-    func save(original: WebLink?, name: String, url: String, icon: NSImage) {
+    func save(original: WebLink?, name: String, url: String, keywords: [String], icon: NSImage) {
         var link = original ?? WebLink(id: UUID().uuidString.lowercased(), name: name, url: url, appName: nil)
         link.name = name
         link.url = url
+        link.keywords = keywords.isEmpty ? nil : keywords
         busy = "正在生成「\(name)」…"
         Task.detached {
             do {
@@ -510,7 +588,14 @@ struct ContentView: View {
                 .resizable().interpolation(.high)
                 .frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 3) {
-                Text(l.name).font(.body.weight(.medium))
+                HStack(spacing: 6) {
+                    Text(l.name).font(.body.weight(.medium))
+                    ForEach(l.keywords ?? [], id: \.self) { k in
+                        Text(k).font(.caption2).foregroundStyle(.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                    }
+                }
                 Text(l.url).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             Spacer()
@@ -535,6 +620,7 @@ enum IconMode { case existing, image, letter, unset }
 final class EditModel: ObservableObject {
     @Published var name: String
     @Published var url: String
+    @Published var keywords: String
     @Published var mode: IconMode
     @Published var source: NSImage?
     @Published var fetching = false
@@ -542,6 +628,7 @@ final class EditModel: ObservableObject {
     init(_ original: WebLink?) {
         name = original?.name ?? ""
         url = original?.url ?? ""
+        keywords = (original?.keywords ?? []).joined(separator: " ")
         mode = original == nil ? .unset : .existing
     }
 }
@@ -594,6 +681,11 @@ struct EditView: View {
                 Form {
                     TextField("名称", text: $m.name, prompt: Text("Spotlight 里搜索用，如 Gmail"))
                     TextField("网址", text: $m.url, prompt: Text("https://…"))
+                    TextField("关键词", text: $m.keywords, prompt: Text("可选，空格分隔，如 txy tx"))
+                    if !pinyinKeywords(trimmedName).isEmpty {
+                        Text("已自动支持拼音：\(pinyinKeywords(trimmedName).joined(separator: "、"))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     HStack {
                         Button(m.fetching ? "获取中…" : "自动获取图标") { Task { await autoFetch() } }
                             .disabled(m.fetching || URL(string: normalizedURL)?.host == nil)
@@ -651,7 +743,7 @@ struct EditView: View {
         case .image: icon = renderIcon(source: m.source, name: trimmedName)
         case .letter, .unset: icon = renderIcon(source: nil, name: trimmedName)
         }
-        store.save(original: original, name: trimmedName, url: normalizedURL, icon: icon)
+        store.save(original: original, name: trimmedName, url: normalizedURL, keywords: parseKeywords(m.keywords), icon: icon)
         close()
     }
 }
@@ -665,17 +757,25 @@ func blocking(_ work: @escaping @Sendable () async -> Void) {
 }
 
 func cli() -> Bool {
-    let a = CommandLine.arguments
+    var a = CommandLine.arguments
     guard a.count >= 2 else { return false }
+    // 可选参数 -k/--kw "txy tx"：给 --import 指定关键词
+    var kwOption: [String]?
+    if let i = a.firstIndex(where: { $0 == "-k" || $0 == "--kw" }), i >= 2, i + 1 < a.count {
+        kwOption = parseKeywords(a[i + 1])
+        a.removeSubrange(i...(i + 1))
+    }
     switch a[1] {
-    case "--import":   // --import 名称 网址 [现成图标PNG]
-        guard a.count >= 4 else { print("用法: --import 名称 网址 [图标]"); exit(2) }
+    case "--import":   // --import 名称 网址 [现成图标PNG] [-k 关键词]
+        guard a.count >= 4 else { print("用法: --import 名称 网址 [图标] [-k \"关键词 …\"]"); exit(2) }
         let name = a[2], url = a[3], iconPath = a.count >= 5 ? a[4] : nil
+        let kw = kwOption
         blocking {
             var links = loadLinks()
             let existing = links.first { safeAppName($0.name) == safeAppName(name) }
-            let link = existing.map { var l = $0; l.url = url; return l }
+            var link = existing.map { var l = $0; l.url = url; return l }
                 ?? WebLink(id: UUID().uuidString.lowercased(), name: name, url: url, appName: nil)
+            if let kw { link.keywords = kw.isEmpty ? nil : kw }
             let icon: NSImage
             if let iconPath, !iconPath.hasPrefix("src:"), let img = NSImage(contentsOfFile: iconPath) {
                 icon = img
@@ -696,6 +796,23 @@ func cli() -> Bool {
                 print("✗ \(name): \(error.localizedDescription)")
             }
         }
+        exit(0)
+    case "--keywords":   // --keywords 名称 "txy tx"：只改关键词，不重建入口；传空字符串清空
+        guard a.count >= 4 else { print("用法: --keywords 名称 \"关键词 …\""); exit(2) }
+        var links = loadLinks()
+        guard let i = links.firstIndex(where: { safeAppName($0.name) == safeAppName(a[2]) }) else {
+            print("✗ 没有找到「\(a[2])」"); exit(1)
+        }
+        let kw = parseKeywords(a[3])
+        links[i].keywords = kw.isEmpty ? nil : kw
+        saveLinks(links)
+        syncAllKeywords([links[i]])
+        print("✓ \(links[i].name) 关键词：\(searchKeywords(links[i]).joined(separator: " "))")
+        exit(0)
+    case "--sync-keywords":   // 给所有已有入口补写拼音 / 关键词
+        let links = loadLinks()
+        syncAllKeywords(links)
+        for l in links { print("\(l.name)：\(searchKeywords(l).joined(separator: " "))") }
         exit(0)
     case "--self-icon":   // --self-icon 输出PNG
         guard a.count >= 3 else { exit(2) }
